@@ -24,6 +24,26 @@ const HEADERS = {
   'Accept': 'application/json, text/plain, */*'
 };
 
+// 遇到临时性错误（502/503/超时之类）重试几次，不要一次抽风就整体失败
+async function fetchWithRetry(url, retries=3){
+  for(let attempt=1; attempt<=retries; attempt++){
+    try{
+      const res = await fetch(url, { headers: HEADERS });
+      if(!res.ok){
+        if(res.status>=500 && attempt<retries){
+          await new Promise(r=>setTimeout(r, 800*attempt));
+          continue;
+        }
+        throw new Error('http '+res.status);
+      }
+      return await res.json();
+    }catch(e){
+      if(attempt>=retries) throw e;
+      await new Promise(r=>setTimeout(r, 800*attempt));
+    }
+  }
+}
+
 async function fetchStockList(){
   const all = [];
   let pn = 1;
@@ -34,9 +54,7 @@ async function fetchStockList(){
   while(true){
     const url = `https://push2.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${pz}&po=1&np=1`+
       `&fltt=2&invt=2&fid=f3&fs=${encodeURIComponent(fs_filter)}&fields=${fields}`;
-    const res = await fetch(url, { headers: HEADERS });
-    if(!res.ok) throw new Error('http '+res.status);
-    const json = await res.json();
+    const json = await fetchWithRetry(url);
     const list = (json && json.data && json.data.diff) || [];
     console.log(`  第${pn}页拿到 ${list.length} 条`);
     if(list.length === 0) break; // 真正翻到空页才算拿完
@@ -52,9 +70,7 @@ async function fetchLatestBar(secid){
   const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
     `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61`+
     `&klt=101&fqt=1&end=20500101&lmt=2`;
-  const res = await fetch(url, { headers: HEADERS });
-  if(!res.ok) throw new Error('http '+res.status);
-  const json = await res.json();
+  const json = await fetchWithRetry(url);
   const klines = json && json.data && json.data.klines;
   if(!klines || !klines.length) throw new Error('no data');
   const f = klines[klines.length-1].split(',');
