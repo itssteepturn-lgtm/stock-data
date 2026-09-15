@@ -96,9 +96,37 @@ async function pool(items, worker, concurrency){
   return results;
 }
 
+const LIST_CACHE_FILE = 'data/stock-list.json';
+
+// 拉股票清单：整体失败就整体重试几次（不只是单页重试），每次之间留久一点冷却时间；
+// 全都失败的话，退而求其次用仓库里存的"上次成功的清单"，这样单日的接口抽风
+// 不会让整个采集彻底失败（缺点是当天新上市的股票会漏掉，但影响很小）
+async function getStockList(){
+  for(let wholeAttempt=1; wholeAttempt<=3; wholeAttempt++){
+    try{
+      const list = await fetchStockList();
+      if(list.length < 1000) throw new Error('列表长度异常，只有'+list.length+'条');
+      fs.mkdirSync(path.dirname(LIST_CACHE_FILE), { recursive:true });
+      fs.writeFileSync(LIST_CACHE_FILE, JSON.stringify(list));
+      return list;
+    }catch(e){
+      console.log(`第${wholeAttempt}次整体拉取清单失败：${e.message}`);
+      if(wholeAttempt<3){
+        console.log('冷却20秒后重试整个清单...');
+        await new Promise(r=>setTimeout(r, 20000));
+      }
+    }
+  }
+  if(fs.existsSync(LIST_CACHE_FILE)){
+    console.log('清单接口今天彻底不给力，改用仓库里缓存的上次清单');
+    return JSON.parse(fs.readFileSync(LIST_CACHE_FILE, 'utf8'));
+  }
+  throw new Error('拿不到股票清单，仓库里也还没有缓存可用（这应该是第一次跑才会遇到）');
+}
+
 async function main(){
   console.log('抓取股票列表...');
-  let list = await fetchStockList();
+  let list = await getStockList();
   console.log(`全市场共 ${list.length} 只`);
   if(list.length === 0){
     console.error('股票列表是空的，多半是被目标接口拦截了，直接判定失败，不要静默"成功"');
