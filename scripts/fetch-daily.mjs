@@ -16,6 +16,14 @@ const MAX_DAYS_KEPT = 1500;
 const CONCURRENCY = 8;       // 并发别开太大，避免短时间内触发限流
 const DELAY_MS = 150;        // 每个请求之间留点间隔
 
+// GitHub服务器发请求默认不带浏览器那种请求头，容易被当成明显的爬虫流量拦截
+// （表现为安静地返回空数据，不是报错），所以显式伪装成浏览器
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Referer': 'https://quote.eastmoney.com/',
+  'Accept': 'application/json, text/plain, */*'
+};
+
 async function fetchStockList(){
   const all = [];
   let pn = 1;
@@ -26,10 +34,11 @@ async function fetchStockList(){
   while(true){
     const url = `https://push2.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${pz}&po=1&np=1`+
       `&fltt=2&invt=2&fid=f3&fs=${encodeURIComponent(fs_filter)}&fields=${fields}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { headers: HEADERS });
     if(!res.ok) throw new Error('http '+res.status);
     const json = await res.json();
     const list = (json && json.data && json.data.diff) || [];
+    console.log(`  第${pn}页拿到 ${list.length} 条`);
     all.push(...list);
     if(list.length < pz) break;
     pn++;
@@ -42,7 +51,7 @@ async function fetchLatestBar(secid){
   const url = `https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=${secid}`+
     `&fields1=f1,f2,f3,f4,f5&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61`+
     `&klt=101&fqt=1&end=20500101&lmt=2`;
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: HEADERS });
   if(!res.ok) throw new Error('http '+res.status);
   const json = await res.json();
   const klines = json && json.data && json.data.klines;
@@ -73,6 +82,10 @@ async function main(){
   console.log('抓取股票列表...');
   let list = await fetchStockList();
   console.log(`全市场共 ${list.length} 只`);
+  if(list.length === 0){
+    console.error('股票列表是空的，多半是被目标接口拦截了，直接判定失败，不要静默"成功"');
+    process.exit(1);
+  }
 
   const testLimit = process.env.FETCH_LIMIT ? parseInt(process.env.FETCH_LIMIT, 10) : null;
   if(testLimit){
@@ -89,6 +102,7 @@ async function main(){
   }, CONCURRENCY);
 
   let updated=0, failed=0;
+  const dateCounts = {};
   results.forEach((r, i)=>{
     if(!r || r.error){ failed++; return; }
     const file = path.join(DATA_DIR, `${r.code}.json`);
@@ -104,8 +118,17 @@ async function main(){
     if(arr.length > MAX_DAYS_KEPT) arr = arr.slice(arr.length-MAX_DAYS_KEPT);
     fs.writeFileSync(file, JSON.stringify(arr));
     updated++;
+    dateCounts[r.bar.date] = (dateCounts[r.bar.date]||0) + 1;
   });
-  console.log(`完成：更新 ${updated} 只，失败 ${failed} 只（失败率 ${(failed/list.length*100).toFixed(1)}%）`);
+
+  // 绝大多数股票这次抓到的应该是同一个交易日，取出现次数最多的那个日期作为"更新至"
+  const lastUpdateDate = Object.entries(dateCounts).sort((a,b)=>b[1]-a[1])[0]?.[0] || null;
+  fs.writeFileSync('data/meta.json', JSON.stringify({
+    lastUpdateDate, updated, failed, total: list.length,
+    ranAt: new Date().toISOString()
+  }));
+
+  console.log(`完成：更新 ${updated} 只，失败 ${failed} 只（失败率 ${(failed/list.length*100).toFixed(1)}%），数据日期 ${lastUpdateDate}`);
   if(failed/list.length > 0.3){
     console.error('失败率过高，可能是被限流了，建议检查');
     process.exit(1);
