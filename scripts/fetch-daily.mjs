@@ -27,7 +27,7 @@ const HEADERS = {
 async function fetchStockList(){
   const all = [];
   let pn = 1;
-  const pz = 5000;
+  const pz = 100; // 这个接口实测每页最多给100条，不管请求里写多大都会被裁到这个数
   // 沪深主板/中小板/创业板/科创板/北交所 股票（不含指数、不含B股/退市股）
   const fs_filter = 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048';
   const fields = 'f12,f13'; // 代码, 市场(0=深 1=沪)
@@ -39,10 +39,11 @@ async function fetchStockList(){
     const json = await res.json();
     const list = (json && json.data && json.data.diff) || [];
     console.log(`  第${pn}页拿到 ${list.length} 条`);
+    if(list.length === 0) break; // 真正翻到空页才算拿完
     all.push(...list);
-    if(list.length < pz) break;
     pn++;
-    if(pn > 5) break; // 安全上限
+    if(pn > 80) break; // 安全上限，80页*100条=8000，够覆盖全市场
+    await new Promise(r=>setTimeout(r, DELAY_MS));
   }
   return all.map(q=>({ code:q.f12, market:q.f13 })).filter(x=>x.code && x.market!=null);
 }
