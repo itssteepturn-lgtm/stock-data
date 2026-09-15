@@ -14,7 +14,8 @@ import path from 'path';
 const DATA_DIR = 'data/stocks';
 const MAX_DAYS_KEPT = 1500;
 const CONCURRENCY = 8;       // 并发别开太大，避免短时间内触发限流
-const DELAY_MS = 150;        // 每个请求之间留点间隔
+const DELAY_MS = 150;        // 抓个股数据时，每个请求之间留点间隔
+const LIST_DELAY_MS = 600;   // 拉股票列表这个接口比较容易502，翻页间隔留久一点
 
 // GitHub服务器发请求默认不带浏览器那种请求头，容易被当成明显的爬虫流量拦截
 // （表现为安静地返回空数据，不是报错），所以显式伪装成浏览器
@@ -25,13 +26,13 @@ const HEADERS = {
 };
 
 // 遇到临时性错误（502/503/超时之类）重试几次，不要一次抽风就整体失败
-async function fetchWithRetry(url, retries=3){
+async function fetchWithRetry(url, retries=6){
   for(let attempt=1; attempt<=retries; attempt++){
     try{
       const res = await fetch(url, { headers: HEADERS });
       if(!res.ok){
         if(res.status>=500 && attempt<retries){
-          await new Promise(r=>setTimeout(r, 800*attempt));
+          await new Promise(r=>setTimeout(r, 1500*attempt));
           continue;
         }
         throw new Error('http '+res.status);
@@ -39,7 +40,7 @@ async function fetchWithRetry(url, retries=3){
       return await res.json();
     }catch(e){
       if(attempt>=retries) throw e;
-      await new Promise(r=>setTimeout(r, 800*attempt));
+      await new Promise(r=>setTimeout(r, 1500*attempt));
     }
   }
 }
@@ -61,7 +62,7 @@ async function fetchStockList(){
     all.push(...list);
     pn++;
     if(pn > 80) break; // 安全上限，80页*100条=8000，够覆盖全市场
-    await new Promise(r=>setTimeout(r, DELAY_MS));
+    await new Promise(r=>setTimeout(r, LIST_DELAY_MS));
   }
   return all.map(q=>({ code:q.f12, market:q.f13 })).filter(x=>x.code && x.market!=null);
 }
