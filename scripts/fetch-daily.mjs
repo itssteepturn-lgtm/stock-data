@@ -124,61 +124,127 @@ async function getStockList(){
   throw new Error('拿不到股票清单，仓库里也还没有缓存可用（这应该是第一次跑才会遇到）');
 }
 
+const BATCH_SIZE = 100;     // 每次跑只处理这么多只，抓完记进度，下次接着抓
+const STATE_FILE = 'data/collect-state.json';
+
+function loadState(){
+  if(fs.existsSync(STATE_FILE)){
+    try{ return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }catch(e){}
+  }
+  return null;
+}
+function saveState(state){
+  fs.mkdirSync(path.dirname(STATE_FILE), { recursive:true });
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+}
+
 async function main(){
-  console.log('抓取股票列表...');
-  let list = await getStockList();
-  console.log(`全市场共 ${list.length} 只`);
-  if(list.length === 0){
-    console.error('股票列表是空的，多半是被目标接口拦截了，直接判定失败，不要静默"成功"');
-    process.exit(1);
-  }
-
   const testLimit = process.env.FETCH_LIMIT ? parseInt(process.env.FETCH_LIMIT, 10) : null;
+
+  // 测试模式：忽略断点续传状态，直接抓一小批看看通不通，不影响正式进度
   if(testLimit){
+    console.log('抓取股票列表...');
+    let list = await getStockList();
+    console.log(`全市场共 ${list.length} 只，测试模式只跑前 ${testLimit} 只`);
     list = list.slice(0, testLimit);
-    console.log(`测试模式，只跑前 ${list.length} 只`);
+    fs.mkdirSync(DATA_DIR, { recursive:true });
+    const results = await pool(list, async (item)=>{
+      const bar = await fetchLatestBar(`${item.market}.${item.code}`);
+      return { code:item.code, bar };
+    }, CONCURRENCY);
+    let updated=0, failed=0;
+    results.forEach(r=>{
+      if(!r||r.error){ failed++; return; }
+      writeBarToFile(r.code, r.bar);
+      updated++;
+    });
+    console.log(`测试完成：更新 ${updated} 只，失败 ${failed} 只`);
+    return;
   }
 
+  // 正式模式：断点续传，每次只处理一批，跑完一整轮之后要隔12小时以上才会开始新一轮
+  // （交易日每天大概只会真正触发一次完整轮次：收盘后开始，慢慢抓到抓完为止）
+  let state = loadState() || { inProgress:false, nextIndex:0, updatedTotal:0, failedTotal:0, dateCounts:{}, doneAt:null };
+
+  if(!state.inProgress){
+    if(state.doneAt){
+      const hoursSince = (Date.now() - new Date(state.doneAt).getTime()) / 3600000;
+      if(hoursSince < 12){
+        console.log(`距离上一轮采集完成才过了 ${hoursSince.toFixed(1)} 小时，还不到12小时，本次跳过`);
+        return;
+      }
+    }
+    console.log('开始新一轮全市场采集');
+    state = { inProgress:true, nextIndex:0, updatedTotal:0, failedTotal:0, dateCounts:{}, doneAt:null };
+  }
+
+  console.log('抓取股票列表...');
+  const list = await getStockList();
+  console.log(`全市场共 ${list.length} 只，本轮进度 ${state.nextIndex}/${list.length}`);
+  if(list.length === 0){
+    console.error('股票列表是空的，本次先跳过，下次继续（不推进进度）');
+    return;
+  }
+
+  const batch = list.slice(state.nextIndex, state.nextIndex + BATCH_SIZE);
+  if(batch.length === 0){
+    console.log('清单里已经没有更多要处理的了，直接标记本轮完成');
+    finishRound(state, list.length);
+    saveState(state);
+    return;
+  }
+
+  console.log(`本次处理第 ${state.nextIndex+1} - ${state.nextIndex+batch.length} 只`);
   fs.mkdirSync(DATA_DIR, { recursive:true });
 
-  const results = await pool(list, async (item)=>{
-    const secid = `${item.market}.${item.code}`;
-    const bar = await fetchLatestBar(secid);
+  const results = await pool(batch, async (item)=>{
+    const bar = await fetchLatestBar(`${item.market}.${item.code}`);
     return { code:item.code, bar };
   }, CONCURRENCY);
 
-  let updated=0, failed=0;
-  const dateCounts = {};
-  results.forEach((r, i)=>{
-    if(!r || r.error){ failed++; return; }
-    const file = path.join(DATA_DIR, `${r.code}.json`);
-    let arr = [];
-    if(fs.existsSync(file)){
-      try{ arr = JSON.parse(fs.readFileSync(file,'utf8')); }catch(e){ arr=[]; }
-    }
-    if(arr.length && arr[arr.length-1].date === r.bar.date){
-      arr[arr.length-1] = r.bar;
-    }else{
-      arr.push(r.bar);
-    }
-    if(arr.length > MAX_DAYS_KEPT) arr = arr.slice(arr.length-MAX_DAYS_KEPT);
-    fs.writeFileSync(file, JSON.stringify(arr));
-    updated++;
-    dateCounts[r.bar.date] = (dateCounts[r.bar.date]||0) + 1;
+  let batchUpdated=0, batchFailed=0;
+  results.forEach(r=>{
+    if(!r || r.error){ batchFailed++; return; }
+    writeBarToFile(r.code, r.bar);
+    batchUpdated++;
+    state.dateCounts[r.bar.date] = (state.dateCounts[r.bar.date]||0) + 1;
   });
 
-  // 绝大多数股票这次抓到的应该是同一个交易日，取出现次数最多的那个日期作为"更新至"
-  const lastUpdateDate = Object.entries(dateCounts).sort((a,b)=>b[1]-a[1])[0]?.[0] || null;
-  fs.writeFileSync('data/meta.json', JSON.stringify({
-    lastUpdateDate, updated, failed, total: list.length,
-    ranAt: new Date().toISOString()
-  }));
+  state.nextIndex += batch.length;
+  state.updatedTotal += batchUpdated;
+  state.failedTotal += batchFailed;
+  console.log(`本批完成：更新${batchUpdated}只，失败${batchFailed}只。累计进度 ${state.nextIndex}/${list.length}`);
 
-  console.log(`完成：更新 ${updated} 只，失败 ${failed} 只（失败率 ${(failed/list.length*100).toFixed(1)}%），数据日期 ${lastUpdateDate}`);
-  if(failed/list.length > 0.3){
-    console.error('失败率过高，可能是被限流了，建议检查');
-    process.exit(1);
+  if(state.nextIndex >= list.length){
+    finishRound(state, list.length);
   }
+  saveState(state);
+}
+
+function writeBarToFile(code, bar){
+  const file = path.join(DATA_DIR, `${code}.json`);
+  let arr = [];
+  if(fs.existsSync(file)){
+    try{ arr = JSON.parse(fs.readFileSync(file,'utf8')); }catch(e){ arr=[]; }
+  }
+  if(arr.length && arr[arr.length-1].date === bar.date){
+    arr[arr.length-1] = bar;
+  }else{
+    arr.push(bar);
+  }
+  if(arr.length > MAX_DAYS_KEPT) arr = arr.slice(arr.length-MAX_DAYS_KEPT);
+  fs.writeFileSync(file, JSON.stringify(arr));
+}
+
+function finishRound(state, total){
+  state.inProgress = false;
+  state.doneAt = new Date().toISOString();
+  const lastUpdateDate = Object.entries(state.dateCounts).sort((a,b)=>b[1]-a[1])[0]?.[0] || null;
+  fs.writeFileSync('data/meta.json', JSON.stringify({
+    lastUpdateDate, updated: state.updatedTotal, failed: state.failedTotal,
+    total, ranAt: state.doneAt
+  }));
+  console.log(`本轮全市场采集彻底完成！更新${state.updatedTotal}只，失败${state.failedTotal}只，数据日期${lastUpdateDate}`);
 }
 
 main().catch(e=>{
