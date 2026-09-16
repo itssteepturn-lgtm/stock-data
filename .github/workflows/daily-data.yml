@@ -7,12 +7,13 @@ name: Daily Stock Data Collection
 
 on:
   schedule:
-    # UTC 07:35 = 北京时间 15:35，A股收盘（15:00）后留了半小时缓冲
-    - cron: 35 7 * * 1-5
+    # 每15分钟跑一次，全天候。脚本自己会判断：一轮采集完成后12小时内不会重复启动新一轮，
+    # 所以大部分时间是"检查一下发现还没到点/已经做完了"的空转，成本很低
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       limit:
-        description: '测试模式：只抓前N只股票（留空=全市场）'
+        description: '测试模式：只抓前N只股票（留空=正常断点续传模式）'
         required: false
         default: ''
 
