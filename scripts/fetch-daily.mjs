@@ -68,23 +68,39 @@ async function diagnoseSingleRequest(){
 
 async function fetchStockList(){
   const all = [];
-  let pn = 1;
-  const pz = 200; // 实测100肯定能用，试试200能不能减少一半的翻页次数
+  const pz = 100; // 实测无论pz写多大，服务器都硬性只给100条一页，没必要再试更大的数
   // 沪深主板/中小板/创业板/科创板/北交所 股票（不含指数、不含B股/退市股）
   const fs_filter = 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048';
-  const fields = 'f12,f13'; // 代码, 市场(0=深 1=沪)
-  while(true){
-    const url = `https://push2.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${pz}&po=1&np=1`+
+  const fields = 'f12,f13';
+
+  function buildUrl(pn){
+    return `https://push2.eastmoney.com/api/qt/clist/get?pn=${pn}&pz=${pz}&po=1&np=1`+
       `&fltt=2&invt=2&fid=f3&fs=${encodeURIComponent(fs_filter)}&fields=${fields}`;
-    const json = await fetchWithRetry(url);
-    const list = (json && json.data && json.data.diff) || [];
-    console.log(`  第${pn}页拿到 ${list.length} 条`);
-    if(list.length === 0) break; // 真正翻到空页才算拿完
-    all.push(...list);
-    pn++;
-    if(pn > 80) break; // 安全上限，80页*100条=8000，够覆盖全市场
-    await new Promise(r=>setTimeout(r, LIST_DELAY_MS));
   }
+
+  // 第一页顺便拿到 total，算出总共要翻多少页，不再靠"翻到空页才算完"这种脆弱的判断
+  const first = await fetchWithRetry(buildUrl(1));
+  const total = first && first.data && first.data.total;
+  const firstPageList = (first && first.data && first.data.diff) || [];
+  console.log(`  第1页拿到 ${firstPageList.length} 条，服务器报告全市场共 ${total} 条`);
+  all.push(...firstPageList);
+
+  const totalPages = total ? Math.ceil(total/pz) : 80;
+  let failedPages = 0;
+  for(let pn=2; pn<=totalPages; pn++){
+    await new Promise(r=>setTimeout(r, LIST_DELAY_MS));
+    try{
+      const json = await fetchWithRetry(buildUrl(pn));
+      const list = (json && json.data && json.data.diff) || [];
+      console.log(`  第${pn}页拿到 ${list.length} 条`);
+      all.push(...list);
+    }catch(e){
+      failedPages++;
+      console.log(`  第${pn}页失败，跳过这一页继续（${e.message}）`);
+    }
+  }
+  if(failedPages>0) console.log(`共有 ${failedPages} 页失败被跳过，这些股票这一轮会漏掉，下轮再补`);
+
   return all.map(q=>({ code:q.f12, market:q.f13 })).filter(x=>x.code && x.market!=null);
 }
 
