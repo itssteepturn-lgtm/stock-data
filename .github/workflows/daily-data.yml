@@ -16,6 +16,10 @@ on:
         description: '测试模式：只抓前N只股票（留空=正常断点续传模式）'
         required: false
         default: ''
+      diagnose:
+        description: '诊断模式：填任意内容（比如yes），只发一次请求打印原始返回，不抓数据'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -38,6 +42,7 @@ jobs:
       - name: 抓取当日行情
         env:
           FETCH_LIMIT: ${{ github.event.inputs.limit }}
+          DIAGNOSE: ${{ github.event.inputs.diagnose }}
         run: node scripts/fetch-daily.mjs
 
       - name: 提交更新
