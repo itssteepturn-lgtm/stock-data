@@ -101,7 +101,33 @@ const LIST_CACHE_FILE = 'data/stock-list.json';
 // 拉股票清单：整体失败就整体重试几次（不只是单页重试），每次之间留久一点冷却时间；
 // 全都失败的话，退而求其次用仓库里存的"上次成功的清单"，这样单日的接口抽风
 // 不会让整个采集彻底失败（缺点是当天新上市的股票会漏掉，但影响很小）
+// 清单缓存超过这么多天没刷新，才会再去尝试重新拉一次最新的（跟上新股/退市），
+// 平时都是直接用缓存，压根不去碰那个不稳定的接口
+const LIST_REFRESH_DAYS = 14;
+
+function loadCachedList(){
+  if(!fs.existsSync(LIST_CACHE_FILE)) return null;
+  try{
+    const list = JSON.parse(fs.readFileSync(LIST_CACHE_FILE, 'utf8'));
+    if(Array.isArray(list) && list.length >= 1000) return list;
+  }catch(e){}
+  return null;
+}
+
+// 清单缓存优先：只要有能用的缓存就直接用，不去反复碰那个不稳定的接口；
+// 缓存太久没刷新，或者压根没有缓存，才会真的去现拉（并带上重试+冷却）
 async function getStockList(){
+  const cached = loadCachedList();
+  const cacheAge = fs.existsSync(LIST_CACHE_FILE)
+    ? (Date.now() - fs.statSync(LIST_CACHE_FILE).mtimeMs) / 86400000
+    : Infinity;
+
+  if(cached && cacheAge < LIST_REFRESH_DAYS){
+    console.log(`用缓存的股票清单（${cacheAge.toFixed(1)}天前抓的，共${cached.length}只）`);
+    return cached;
+  }
+
+  console.log(cached ? '缓存清单有点久了，尝试刷新一下...' : '还没有缓存清单，现拉一份...');
   for(let wholeAttempt=1; wholeAttempt<=3; wholeAttempt++){
     try{
       const list = await fetchStockList();
@@ -116,6 +142,10 @@ async function getStockList(){
         await new Promise(r=>setTimeout(r, 20000));
       }
     }
+  }
+  if(cached){
+    console.log('刷新失败，继续用手头的旧缓存清单顶着');
+    return cached;
   }
   if(fs.existsSync(LIST_CACHE_FILE)){
     console.log('清单接口今天彻底不给力，改用仓库里缓存的上次清单');
