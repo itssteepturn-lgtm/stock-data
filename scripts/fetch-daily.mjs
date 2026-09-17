@@ -15,7 +15,7 @@ const DATA_DIR = 'data/stocks';
 const MAX_DAYS_KEPT = 1500;
 const CONCURRENCY = 8;       // 并发别开太大，避免短时间内触发限流
 const DELAY_MS = 150;        // 抓个股数据时，每个请求之间留点间隔
-const LIST_DELAY_MS = 600;   // 拉股票列表这个接口比较容易502，翻页间隔留久一点
+const LIST_DELAY_MS = 300;  // 拉股票列表翻页间隔，从数据看放慢没什么用，缩短一点
 
 // GitHub服务器发请求默认不带浏览器那种请求头，容易被当成明显的爬虫流量拦截
 // （表现为安静地返回空数据，不是报错），所以显式伪装成浏览器
@@ -45,10 +45,31 @@ async function fetchWithRetry(url, retries=6){
   }
 }
 
+// 诊断用：只发一次超大页请求，把原始返回内容打印出来，直接看服务器到底怎么处理的，
+// 不猜、不套重试逻辑
+async function diagnoseSingleRequest(){
+  const fs_filter = 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048';
+  const url = `https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=6000&po=1&np=1`+
+    `&fltt=2&invt=2&fid=f3&fs=${encodeURIComponent(fs_filter)}&fields=f12,f13,f14`;
+  console.log('请求URL:', url);
+  const res = await fetch(url, { headers: HEADERS });
+  console.log('HTTP状态:', res.status, res.statusText);
+  const text = await res.text();
+  console.log('返回内容总长度:', text.length, '字符');
+  console.log('前300字符:', text.slice(0, 300));
+  try{
+    const json = JSON.parse(text);
+    console.log('data.total字段:', json && json.data && json.data.total);
+    console.log('diff数组实际长度:', json && json.data && json.data.diff && json.data.diff.length);
+  }catch(e){
+    console.log('JSON解析失败:', e.message);
+  }
+}
+
 async function fetchStockList(){
   const all = [];
   let pn = 1;
-  const pz = 100; // 这个接口实测每页最多给100条，不管请求里写多大都会被裁到这个数
+  const pz = 200; // 实测100肯定能用，试试200能不能减少一半的翻页次数
   // 沪深主板/中小板/创业板/科创板/北交所 股票（不含指数、不含B股/退市股）
   const fs_filter = 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048';
   const fields = 'f12,f13'; // 代码, 市场(0=深 1=沪)
@@ -115,7 +136,9 @@ function loadCachedList(){
 }
 
 // 清单缓存优先：只要有能用的缓存就直接用，不去反复碰那个不稳定的接口；
-// 缓存太久没刷新，或者压根没有缓存，才会真的去现拉（并带上重试+冷却）
+// 缓存太久没刷新，或者压根没有缓存，才会真的去现拉一次。
+// 只试一次就够了——不行的话，反正每15分钟会有新一次运行自动重来，
+// 没必要在一次运行里死等好几轮冷却，那样只是让这次运行变慢，成功率并不会更高
 async function getStockList(){
   const cached = loadCachedList();
   const cacheAge = fs.existsSync(LIST_CACHE_FILE)
@@ -128,30 +151,21 @@ async function getStockList(){
   }
 
   console.log(cached ? '缓存清单有点久了，尝试刷新一下...' : '还没有缓存清单，现拉一份...');
-  for(let wholeAttempt=1; wholeAttempt<=3; wholeAttempt++){
-    try{
-      const list = await fetchStockList();
-      if(list.length < 1000) throw new Error('列表长度异常，只有'+list.length+'条');
-      fs.mkdirSync(path.dirname(LIST_CACHE_FILE), { recursive:true });
-      fs.writeFileSync(LIST_CACHE_FILE, JSON.stringify(list));
-      return list;
-    }catch(e){
-      console.log(`第${wholeAttempt}次整体拉取清单失败：${e.message}`);
-      if(wholeAttempt<3){
-        console.log('冷却20秒后重试整个清单...');
-        await new Promise(r=>setTimeout(r, 20000));
-      }
-    }
+  try{
+    const list = await fetchStockList();
+    if(list.length < 1000) throw new Error('列表长度异常，只有'+list.length+'条');
+    fs.mkdirSync(path.dirname(LIST_CACHE_FILE), { recursive:true });
+    fs.writeFileSync(LIST_CACHE_FILE, JSON.stringify(list));
+    return list;
+  }catch(e){
+    console.log(`这次拉取清单失败：${e.message}`);
   }
   if(cached){
     console.log('刷新失败，继续用手头的旧缓存清单顶着');
     return cached;
   }
-  if(fs.existsSync(LIST_CACHE_FILE)){
-    console.log('清单接口今天彻底不给力，改用仓库里缓存的上次清单');
-    return JSON.parse(fs.readFileSync(LIST_CACHE_FILE, 'utf8'));
-  }
-  throw new Error('拿不到股票清单，仓库里也还没有缓存可用（这应该是第一次跑才会遇到）');
+  console.log('这次还没拿到清单，等下一次自动运行（每15分钟一次）再试');
+  return null;
 }
 
 const BATCH_SIZE = 100;     // 每次跑只处理这么多只，抓完记进度，下次接着抓
@@ -169,12 +183,19 @@ function saveState(state){
 }
 
 async function main(){
+  if(process.env.DIAGNOSE){
+    console.log('=== 诊断模式：只发一次请求，看原始返回 ===');
+    await diagnoseSingleRequest();
+    return;
+  }
+
   const testLimit = process.env.FETCH_LIMIT ? parseInt(process.env.FETCH_LIMIT, 10) : null;
 
   // 测试模式：忽略断点续传状态，直接抓一小批看看通不通，不影响正式进度
   if(testLimit){
     console.log('抓取股票列表...');
     let list = await getStockList();
+    if(!list){ console.log('这次没拿到清单，稍后再试'); return; }
     console.log(`全市场共 ${list.length} 只，测试模式只跑前 ${testLimit} 只`);
     list = list.slice(0, testLimit);
     fs.mkdirSync(DATA_DIR, { recursive:true });
@@ -210,6 +231,11 @@ async function main(){
 
   console.log('抓取股票列表...');
   const list = await getStockList();
+  if(!list){
+    console.log('这次没拿到清单（也没有缓存能顶），本次不推进进度，等下次自动运行再试');
+    saveState(state); // 保留 inProgress:true，下次直接接着尝试，不会重新计时
+    return;
+  }
   console.log(`全市场共 ${list.length} 只，本轮进度 ${state.nextIndex}/${list.length}`);
   if(list.length === 0){
     console.error('股票列表是空的，本次先跳过，下次继续（不推进进度）');
