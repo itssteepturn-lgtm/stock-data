@@ -4,27 +4,30 @@ name: Daily Stock Data Collection
 # 公开仓库的 Actions 分钟数不限量，全市场规模每天跑不用担心额度。
 # 网页仓库继续保持私密 + Cloudflare Access，通过 raw.githubusercontent.com
 # 读这个仓库里的 data/stocks/*.json 即可，跨仓库没问题。
+#
+# 主力方案改成用 baostock（Python，专门给量化用的批量数据接口），
+# 因为东财那个给个人看盘小组件用的接口，实测超过约17次请求就会被限制，
+# 不适合批量抓全市场。scripts/fetch-daily.mjs（Node+东财）先留着当备用，
+# 如果 baostock 这条路也不顺，可以把下面"抓取当日行情"那一步换回去。
 
 on:
   schedule:
-    # 每15分钟跑一次，全天候。脚本自己会判断：一轮采集完成后12小时内不会重复启动新一轮，
-    # 所以大部分时间是"检查一下发现还没到点/已经做完了"的空转，成本很低
-    - cron: '*/15 * * * *'
+    # UTC 07:35 = 北京时间 15:35，A股收盘后留了半小时缓冲
+    - cron: '35 7 * * 1-5'
   workflow_dispatch:
     inputs:
       limit:
-        description: '测试模式：只抓前N只股票（留空=正常断点续传模式）'
+        description: '(备用Node方案专用) 测试模式：只抓前N只'
         required: false
         default: ''
       diagnose:
-        description: '诊断模式：填任意内容（比如yes），只发一次请求打印原始返回，不抓数据'
+        description: '(备用Node方案专用) 诊断模式'
         required: false
         default: ''
 
 permissions:
   contents: write
 
-# 同一时间只允许一个在跑，新触发的会排队等上一个跑完，不会互相冲突
 concurrency:
   group: daily-data-collection
   cancel-in-progress: false
@@ -35,15 +38,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-python@v5
         with:
-          node-version: '20'
+          python-version: '3.11'
 
-      - name: 抓取当日行情
-        env:
-          FETCH_LIMIT: ${{ github.event.inputs.limit }}
-          DIAGNOSE: ${{ github.event.inputs.diagnose }}
-        run: node scripts/fetch-daily.mjs
+      - name: 安装 baostock
+        run: pip install baostock
+
+      - name: 抓取当日行情（baostock）
+        run: python scripts/fetch-daily-baostock.py
 
       - name: 提交更新
         run: |
