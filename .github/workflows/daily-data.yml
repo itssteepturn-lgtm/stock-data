@@ -35,8 +35,14 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 330  # 5.5小时，比脚本自己的5小时预算多留一点缓冲
     steps:
       - uses: actions/checkout@v4
+
+      - name: 配置git身份
+        run: |
+          git config user.name "daily-data-bot"
+          git config user.email "actions@users.noreply.github.com"
 
       - uses: actions/setup-python@v5
         with:
@@ -45,15 +51,14 @@ jobs:
       - name: 安装 baostock
         run: pip install baostock
 
-      - name: 抓取当日行情（baostock）
+      - name: 抓取当日行情（baostock，脚本内部会自己分批提交）
         run: python scripts/fetch-daily-baostock.py
 
-      - name: 提交更新
+      - name: 兜底提交（防止脚本内部提交没覆盖到的零星改动）
+        if: always()
         run: |
-          git config user.name "daily-data-bot"
-          git config user.email "actions@users.noreply.github.com"
           git add data/
-          git diff --staged --quiet || git commit -m "daily data $(date -u +%Y-%m-%d)"
+          git diff --staged --quiet || git commit -m "daily data $(date -u +%Y-%m-%d) final"
           git fetch origin main
-          git merge origin/main --no-edit -X ours -m "merge remote changes, prefer freshly collected data"
-          git push
+          git merge origin/main --no-edit -X ours -m "merge remote changes, prefer freshly collected data" || true
+          git push || true
