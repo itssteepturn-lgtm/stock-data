@@ -42,18 +42,47 @@ def main():
         sys.exit(1)
 
     today = datetime.now().strftime('%Y-%m-%d')
-    print(f"拉取股票清单（截至 {today}）...")
-    rs = bs.query_all_stock(day=today)
     codes = []
     names = {}
-    while rs.error_code == '0' and rs.next():
-        row = rs.get_row_data()
-        code = row[0]
-        code_name = row[2] if len(row) > 2 else ''
-        if code.startswith('sh.60') or code.startswith('sh.68') or \
-           code.startswith('sz.00') or code.startswith('sz.30'):
-            codes.append(code)
-            names[code.split('.')[1]] = code_name
+
+    # 清单优先用仓库里已经存好的（stocks列表变化很小，没必要每次都问baostock）
+    CODES_CACHE = 'data/codes.json'
+    if os.path.exists(CODES_CACHE):
+        try:
+            with open(CODES_CACHE) as f:
+                cached = json.load(f)
+            if isinstance(cached, list) and len(cached) > 1000:
+                print(f"用仓库里已有的股票清单（{len(cached)}只），不重新问baostock要清单")
+                for item in cached:
+                    raw = item.get('code') if isinstance(item, dict) else None
+                    if not raw:
+                        continue
+                    # 还原成 baostock 的 sh./sz. 格式
+                    prefix = 'sh.' if raw.startswith('6') else 'sz.'
+                    codes.append(prefix + raw)
+                    names[raw] = item.get('name', '')
+        except Exception as e:
+            print("读取本地清单缓存失败:", e)
+
+    if not codes:
+        # 没有可用缓存，才现问baostock。今天的清单数据可能还没准备好，
+        # 查到空的话退回去问昨天的（大概率能拿到已经处理好的数据）
+        for query_day in [today, (datetime.now()-timedelta(days=1)).strftime('%Y-%m-%d')]:
+            print(f"拉取股票清单（截至 {query_day}）...")
+            rs = bs.query_all_stock(day=query_day)
+            tmp_codes, tmp_names = [], {}
+            while rs.error_code == '0' and rs.next():
+                row = rs.get_row_data()
+                code = row[0]
+                code_name = row[2] if len(row) > 2 else ''
+                if code.startswith('sh.60') or code.startswith('sh.68') or \
+                   code.startswith('sz.00') or code.startswith('sz.30'):
+                    tmp_codes.append(code)
+                    tmp_names[code.split('.')[1]] = code_name
+            print(f"  拿到 {len(tmp_codes)} 只")
+            if len(tmp_codes) > 1000:
+                codes, names = tmp_codes, tmp_names
+                break
 
     print(f"共 {len(codes)} 只股票")
     if len(codes) < 1000:
