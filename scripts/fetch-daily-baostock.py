@@ -29,12 +29,12 @@ from datetime import datetime, timedelta
 DATA_DIR = "data/stocks"
 META_FILE = "data/meta.json"
 MAX_DAYS_KEPT = 1500
-DEEP_SEED_DAYS = 365          # 第一次没有本地数据时，往回抓这么多天（约1年）
+DEEP_SEED_DAYS = 90          # 第一次没有本地数据时，往回抓这么多天（约3个月）
 TOPUP_DAYS = 10               # 已经有历史的，平时只补这么多天
 MIN_DEPTH_TO_SKIP_SEED = 300  # 本地数据到这个天数以上，就不用再当"第一次"处理
-CHECKPOINT_EVERY = 200        # 跑这么多只就提交推送一次
+CHECKPOINT_EVERY = 100        # 跑这么多只就提交推送一次
 RECONNECT_SECONDS = 180       # 连接活了这么久（不管跑了几只）就强制重连一次
-TIME_BUDGET_SECONDS = 5 * 3600  # 单次运行最多跑这么久，到点就收尾（GitHub上限6小时，留余量）
+TIME_BUDGET_SECONDS = 12 * 60  # 单次运行最多跑这么久（12分钟），配合每15分钟一次的定时，跑很多次短的，比跑一次超长的更稳
 
 def reconnect():
     try:
@@ -60,12 +60,18 @@ def git_checkpoint(tag):
     except subprocess.CalledProcessError as e:
         print(f"  检查点提交失败（继续抓，下次再试）: {e}")
 
-def write_meta(updated, failed, total, date_counts, note=''):
+def write_meta(total, date_counts, note=''):
+    # 真实总数：直接数文件夹里实际有多少个文件，不是心里记"这次抓了几个"——
+    # 不然每次运行的局部计数会互相覆盖，显示出"数字倒退"的假象
+    try:
+        collected = len([f for f in os.listdir(DATA_DIR) if f.endswith('.json')])
+    except Exception:
+        collected = 0
     last_update_date = max(date_counts, key=date_counts.get) if date_counts else None
     with open(META_FILE, 'w') as f:
         json.dump({
             "lastUpdateDate": last_update_date,
-            "updated": updated, "failed": failed, "total": total,
+            "updated": collected, "failed": max(0, total-collected), "total": total,
             "ranAt": datetime.utcnow().isoformat() + "Z",
             "note": note
         }, f)
@@ -125,6 +131,32 @@ def main():
             print("读取本地清单缓存失败:", e)
 
     print(f"共 {len(codes)} 只股票")
+
+    # 顺便抓主要指数（存到单独目录，避免代码跟个股撞号，比如 000001 既是上证指数又是平安银行）
+    INDEX_DIR = "data/indices"
+    os.makedirs(INDEX_DIR, exist_ok=True)
+    INDEXES = [
+        ("sh.000001", "sh000001"), ("sz.399001", "sz399001"),
+        ("sz.399006", "sz399006"), ("sh.000688", "sh000688"),
+    ]
+    for bcode, filename in INDEXES:
+        try:
+            rs3 = bs.query_history_k_data_plus(
+                bcode, "date,open,high,low,close,volume,amount",
+                start_date=(datetime.now()-timedelta(days=DEEP_SEED_DAYS)).strftime('%Y-%m-%d'),
+                end_date=today, frequency="d", adjustflag="2"
+            )
+            rows = []
+            while rs3.error_code == '0' and rs3.next():
+                rows.append(rs3.get_row_data())
+            bars = [{"date":r[0],"open":float(r[1]),"high":float(r[2]),"low":float(r[3]),
+                     "close":float(r[4]),"vol":float(r[5]),"amount":float(r[6])} for r in rows if r[4]]
+            if bars:
+                with open(os.path.join(INDEX_DIR, f"{filename}.json"), 'w') as f:
+                    json.dump(bars, f)
+        except Exception as e:
+            print(f"指数{bcode}抓取失败: {e}")
+
     if len(codes) < 1000:
         print("数量明显不对，判定本次失败")
         bs.logout()
@@ -153,7 +185,7 @@ def main():
             last_login_time = time.time()
 
         if i > 0 and i % CHECKPOINT_EVERY == 0:
-            write_meta(updated, failed, len(codes), date_counts, note='采集进行中')
+            write_meta(len(codes), date_counts, note='采集进行中')
             git_checkpoint(f'{i}/{len(codes)}')
 
         raw_code = code.split('.')[1]
@@ -222,7 +254,7 @@ def main():
         pass
 
     note = '本轮因时间预算提前收尾，还有未处理的股票，下次运行会继续' if stopped_early else '本轮全部处理完成'
-    write_meta(updated, failed, len(codes), date_counts, note=note)
+    write_meta(len(codes), date_counts, note=note)
     git_checkpoint('final')
 
     print(f"完成：更新{updated}只，失败{failed}只，{note}")
