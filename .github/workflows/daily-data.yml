@@ -13,7 +13,7 @@ name: Daily Stock Data Collection
 on:
   schedule:
     # UTC 07:35 = 北京时间 15:35，A股收盘后留了半小时缓冲
-    - cron: '35 7 * * 1-5'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       limit:
