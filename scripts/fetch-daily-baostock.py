@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 DATA_DIR = "data/stocks"
 META_FILE = "data/meta.json"
 MAX_DAYS_KEPT = 1500
-DEEP_SEED_DAYS = 500          # 第一次没有本地数据时，往回抓这么多天
+DEEP_SEED_DAYS = 365          # 第一次没有本地数据时，往回抓这么多天（约1年）
 TOPUP_DAYS = 10               # 已经有历史的，平时只补这么多天
 MIN_DEPTH_TO_SKIP_SEED = 300  # 本地数据到这个天数以上，就不用再当"第一次"处理
 CHECKPOINT_EVERY = 200        # 跑这么多只就提交推送一次
@@ -74,9 +74,15 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     run_start = time.time()
 
-    lg = bs.login()
-    if lg.error_code != '0':
-        print("登录失败:", lg.error_msg)
+    lg = None
+    for attempt in range(3):
+        lg = bs.login()
+        if lg.error_code == '0':
+            break
+        print(f"登录失败（第{attempt+1}次）: {lg.error_msg}，等10秒重试")
+        time.sleep(10)
+    if not lg or lg.error_code != '0':
+        print("登录彻底失败，本次先放弃，下次自动运行再试")
         sys.exit(1)
     last_login_time = time.time()
 
@@ -84,41 +90,39 @@ def main():
     codes = []
     names = {}
 
-    # 清单优先用仓库里已经存好的（stocks列表变化很小，没必要每次都问baostock）
-    CODES_CACHE = 'data/codes.json'
-    if os.path.exists(CODES_CACHE):
+    # 每次都现拉最新清单（今天/昨天兜底），这样新股会自动被发现，不用手动维护清单
+    for query_day in [today, (datetime.now()-timedelta(days=1)).strftime('%Y-%m-%d')]:
+        print(f"拉取股票清单（截至 {query_day}）...")
+        rs = bs.query_all_stock(day=query_day)
+        tmp_codes, tmp_names = [], {}
+        while rs.error_code == '0' and rs.next():
+            row = rs.get_row_data()
+            code = row[0]
+            code_name = row[2] if len(row) > 2 else ''
+            if code.startswith('sh.60') or code.startswith('sh.68') or \
+               code.startswith('sz.00') or code.startswith('sz.30'):
+                tmp_codes.append(code)
+                tmp_names[code.split('.')[1]] = code_name
+        print(f"  拿到 {len(tmp_codes)} 只")
+        if len(tmp_codes) > 1000:
+            codes, names = tmp_codes, tmp_names
+            break
+
+    # 现拉都失败的话，退回去用仓库里上次存的清单顶着（新股会晚几天才发现，但不会整体失败）
+    if not codes and os.path.exists('data/codes.json'):
         try:
-            with open(CODES_CACHE) as f:
+            with open('data/codes.json') as f:
                 cached = json.load(f)
             if isinstance(cached, list) and len(cached) > 1000:
-                print(f"用仓库里已有的股票清单（{len(cached)}只），不重新问baostock要清单")
+                print(f"现拉清单失败，改用仓库里缓存的清单（{len(cached)}只）")
                 for item in cached:
                     raw = item.get('code') if isinstance(item, dict) else None
-                    if not raw:
-                        continue
-                    prefix = 'sh.' if raw.startswith('6') else 'sz.'
-                    codes.append(prefix + raw)
-                    names[raw] = item.get('name', '')
+                    if raw:
+                        prefix = 'sh.' if raw.startswith('6') else 'sz.'
+                        codes.append(prefix + raw)
+                        names[raw] = item.get('name', '')
         except Exception as e:
             print("读取本地清单缓存失败:", e)
-
-    if not codes:
-        for query_day in [today, (datetime.now()-timedelta(days=1)).strftime('%Y-%m-%d')]:
-            print(f"拉取股票清单（截至 {query_day}）...")
-            rs = bs.query_all_stock(day=query_day)
-            tmp_codes, tmp_names = [], {}
-            while rs.error_code == '0' and rs.next():
-                row = rs.get_row_data()
-                code = row[0]
-                code_name = row[2] if len(row) > 2 else ''
-                if code.startswith('sh.60') or code.startswith('sh.68') or \
-                   code.startswith('sz.00') or code.startswith('sz.30'):
-                    tmp_codes.append(code)
-                    tmp_names[code.split('.')[1]] = code_name
-            print(f"  拿到 {len(tmp_codes)} 只")
-            if len(tmp_codes) > 1000:
-                codes, names = tmp_codes, tmp_names
-                break
 
     print(f"共 {len(codes)} 只股票")
     if len(codes) < 1000:
