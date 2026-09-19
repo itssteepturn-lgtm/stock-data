@@ -28,10 +28,10 @@ from datetime import datetime, timedelta
 
 DATA_DIR = "data/stocks"
 META_FILE = "data/meta.json"
-MAX_DAYS_KEPT = 1500
+MAX_DAYS_KEPT = 150
 DEEP_SEED_DAYS = 90          # 第一次没有本地数据时，往回抓这么多天（约3个月）
 TOPUP_DAYS = 10               # 已经有历史的，平时只补这么多天
-MIN_DEPTH_TO_SKIP_SEED = 300  # 本地数据到这个天数以上，就不用再当"第一次"处理
+MIN_DEPTH_TO_SKIP_SEED = 80   # 本地数据到这个天数以上，就不用再当"第一次"处理（必须小于存储上限150，否则永远没法"毕业"到省事的补量模式）
 CHECKPOINT_EVERY = 100        # 跑这么多只就提交推送一次
 RECONNECT_SECONDS = 180       # 连接活了这么久（不管跑了几只）就强制重连一次
 TIME_BUDGET_SECONDS = 12 * 60  # 单次运行最多跑这么久（12分钟），配合每15分钟一次的定时，跑很多次短的，比跑一次超长的更稳
