@@ -168,27 +168,51 @@ def main():
     with open('data/codes.json', 'w') as f:
         json.dump(stock_list, f, ensure_ascii=False)
 
+    CURSOR_FILE = 'data/collect-cursor.json'
+    def load_cursor(total):
+        if os.path.exists(CURSOR_FILE):
+            try:
+                with open(CURSOR_FILE) as f:
+                    idx = json.load(f).get('nextIndex', 0)
+                if isinstance(idx, int) and 0 <= idx < total:
+                    return idx
+            except Exception:
+                pass
+        return 0
+    def save_cursor(idx):
+        with open(CURSOR_FILE, 'w') as f:
+            json.dump({'nextIndex': idx}, f)
+
     updated, failed = 0, 0
     failed_codes = []
     date_counts = {}
     stopped_early = False
+    total = len(codes)
+    start_idx = load_cursor(total)
+    print(f"从第 {start_idx} 个接着抓（上次停在这，不是每次都从头开始）")
 
-    for i, code in enumerate(codes):
-        if i % 500 == 0:
-            print(f"  进度 {i}/{len(codes)}")
+    processed = 0
+    for offset in range(total):
+        i = (start_idx + offset) % total
+        processed = offset
+        code = codes[i]
+        if processed % 500 == 0:
+            print(f"  进度 {processed}/{total}（当前位置{i}）")
 
         if time.time() - run_start > TIME_BUDGET_SECONDS:
-            print(f"到时间预算了，先收尾（处理到第{i}只，剩下的下次继续）")
+            print(f"到时间预算了，先收尾（这次处理了{processed}只，下次从第{i}个接着来）")
             stopped_early = True
+            save_cursor(i)
             break
 
         if time.time() - last_login_time > RECONNECT_SECONDS:
             reconnect()
             last_login_time = time.time()
 
-        if i > 0 and i % CHECKPOINT_EVERY == 0:
-            write_meta(len(codes), date_counts, note='采集进行中')
-            git_checkpoint(f'{i}/{len(codes)}')
+        if processed > 0 and processed % CHECKPOINT_EVERY == 0:
+            write_meta(total, date_counts, note='采集进行中')
+            save_cursor(i)
+            git_checkpoint(f'{processed}/{total} (位置{i})')
 
         raw_code = code.split('.')[1]
         file_path = os.path.join(DATA_DIR, f"{raw_code}.json")
@@ -257,8 +281,11 @@ def main():
     except Exception:
         pass
 
-    note = '本轮因时间预算提前收尾，还有未处理的股票，下次运行会继续' if stopped_early else '本轮全部处理完成'
-    write_meta(len(codes), date_counts, note=note)
+    if not stopped_early:
+        save_cursor(0)  # 一整圈都跑完了，下次从头开始新一轮
+
+    note = '本轮因时间预算提前收尾，还有未处理的股票，下次运行会继续' if stopped_early else '本轮全部处理完成，下次开始新一轮'
+    write_meta(total, date_counts, note=note)
     with open('data/failed-codes.json', 'w') as f:
         json.dump(sorted(set(failed_codes)), f)
 
