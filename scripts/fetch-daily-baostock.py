@@ -97,7 +97,8 @@ def main():
     names = {}
 
     # 每次都现拉最新清单（今天/昨天兜底），这样新股会自动被发现，不用手动维护清单
-    for query_day in [today, (datetime.now()-timedelta(days=1)).strftime('%Y-%m-%d')]:
+    query_days = [(datetime.now()-timedelta(days=n)).strftime('%Y-%m-%d') for n in range(0,6)]
+    for query_day in query_days:
         print(f"拉取股票清单（截至 {query_day}）...")
         rs = bs.query_all_stock(day=query_day)
         tmp_codes, tmp_names = [], {}
@@ -260,6 +261,7 @@ def main():
     write_meta(len(codes), date_counts, note=note)
     with open('data/failed-codes.json', 'w') as f:
         json.dump(sorted(set(failed_codes)), f)
+
     git_checkpoint('final')
 
     print(f"完成：更新{updated}只，失败{failed}只，{note}")
