@@ -168,6 +168,7 @@ def main():
         json.dump(stock_list, f, ensure_ascii=False)
 
     updated, failed = 0, 0
+    failed_codes = []
     date_counts = {}
     stopped_early = False
 
@@ -226,6 +227,7 @@ def main():
 
         if not bars:
             failed += 1
+            failed_codes.append(raw_code)
             continue
 
         if need_deep_seed:
@@ -247,6 +249,7 @@ def main():
                 date_counts[merged[-1]["date"]] = date_counts.get(merged[-1]["date"], 0) + 1
         except Exception:
             failed += 1
+            failed_codes.append(raw_code)
 
     try:
         bs.logout()
@@ -255,6 +258,8 @@ def main():
 
     note = '本轮因时间预算提前收尾，还有未处理的股票，下次运行会继续' if stopped_early else '本轮全部处理完成'
     write_meta(len(codes), date_counts, note=note)
+    with open('data/failed-codes.json', 'w') as f:
+        json.dump(sorted(set(failed_codes)), f)
     git_checkpoint('final')
 
     print(f"完成：更新{updated}只，失败{failed}只，{note}")
