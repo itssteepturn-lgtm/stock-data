@@ -163,7 +163,7 @@ def main():
             while rs3.error_code == '0' and rs3.next():
                 rows.append(rs3.get_row_data())
             bars = [{"date":r[0],"open":float(r[1]),"high":float(r[2]),"low":float(r[3]),
-                     "close":float(r[4]),"vol":float(r[5]),"amount":float(r[6])} for r in rows if r[4]]
+                     "close":float(r[4]),"vol":float(r[5])/100,"amount":float(r[6])} for r in rows if r[4]]
             if bars:
                 with open(os.path.join(INDEX_DIR, f"{filename}.json"), 'w') as f:
                     json.dump(bars, f)
@@ -258,7 +258,7 @@ def main():
                         rows.append(rs2.get_row_data())
                     bars = [
                         {"date": r[0], "open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
-                         "close": float(r[4]), "vol": float(r[5]), "amount": float(r[6]),
+                         "close": float(r[4]), "vol": float(r[5])/100, "amount": float(r[6]),
                          "turnover": float(r[7]) if r[7] else 0}
                         for r in rows if r[4]
                     ]
