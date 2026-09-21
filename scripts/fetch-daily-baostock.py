@@ -61,17 +61,29 @@ def git_checkpoint(tag):
         print(f"  检查点提交失败（继续抓，下次再试）: {e}")
 
 def write_meta(total, date_counts, note=''):
-    # 真实总数：直接数文件夹里实际有多少个文件，不是心里记"这次抓了几个"——
-    # 不然每次运行的局部计数会互相覆盖，显示出"数字倒退"的假象
+    # 真实总数：直接数文件夹里的文件，且区分"确认正常"(>=2天数据)和"刚起步、还在攒"(只有1天)——
+    # 不是心里记"这次抓了几个"，那样每次运行的局部计数会互相覆盖，显示出"数字倒退"的假象
+    confirmed, accumulating = 0, 0
     try:
-        collected = len([f for f in os.listdir(DATA_DIR) if f.endswith('.json')])
+        for fname in os.listdir(DATA_DIR):
+            if not fname.endswith('.json'):
+                continue
+            try:
+                with open(os.path.join(DATA_DIR, fname)) as f:
+                    n = len(json.load(f))
+                if n >= 2:
+                    confirmed += 1
+                elif n == 1:
+                    accumulating += 1
+            except Exception:
+                pass
     except Exception:
-        collected = 0
+        pass
     last_update_date = max(date_counts, key=date_counts.get) if date_counts else None
     with open(META_FILE, 'w') as f:
         json.dump({
             "lastUpdateDate": last_update_date,
-            "updated": collected, "failed": max(0, total-collected), "total": total,
+            "updated": confirmed, "accumulating": accumulating, "total": total,
             "ranAt": datetime.utcnow().isoformat() + "Z",
             "note": note
         }, f)
@@ -228,27 +240,34 @@ def main():
         start_date = (datetime.now() - timedelta(days=DEEP_SEED_DAYS if need_deep_seed else TOPUP_DAYS)).strftime('%Y-%m-%d')
 
         bars = None
-        for attempt in range(2):
-            try:
-                rs2 = bs.query_history_k_data_plus(
-                    code,
-                    "date,open,high,low,close,volume,amount,turn",
-                    start_date=start_date, end_date=today,
-                    frequency="d", adjustflag="2"
-                )
-                rows = []
-                while rs2.error_code == '0' and rs2.next():
-                    rows.append(rs2.get_row_data())
-                bars = [
-                    {"date": r[0], "open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
-                     "close": float(r[4]), "vol": float(r[5]), "amount": float(r[6]),
-                     "turnover": float(r[7]) if r[7] else 0}
-                    for r in rows if r[4]
-                ]
+        date_ranges_to_try = [start_date]
+        if need_deep_seed:
+            # 深度种子如果一直失败，最后退而求其次，只求拿到最近几天，先证明这只股票是正常的
+            date_ranges_to_try.append((datetime.now() - timedelta(days=TOPUP_DAYS)).strftime('%Y-%m-%d'))
+        for try_start in date_ranges_to_try:
+            for attempt in range(2):
+                try:
+                    rs2 = bs.query_history_k_data_plus(
+                        code,
+                        "date,open,high,low,close,volume,amount,turn",
+                        start_date=try_start, end_date=today,
+                        frequency="d", adjustflag="2"
+                    )
+                    rows = []
+                    while rs2.error_code == '0' and rs2.next():
+                        rows.append(rs2.get_row_data())
+                    bars = [
+                        {"date": r[0], "open": float(r[1]), "high": float(r[2]), "low": float(r[3]),
+                         "close": float(r[4]), "vol": float(r[5]), "amount": float(r[6]),
+                         "turnover": float(r[7]) if r[7] else 0}
+                        for r in rows if r[4]
+                    ]
+                    break
+                except Exception:
+                    reconnect()
+                    last_login_time = time.time()
+            if bars:
                 break
-            except Exception:
-                reconnect()
-                last_login_time = time.time()
 
         if not bars:
             failed += 1
