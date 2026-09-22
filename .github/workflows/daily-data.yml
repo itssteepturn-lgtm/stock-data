@@ -35,7 +35,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 330  # 5.5小时，比脚本自己的5小时预算多留一点缓冲
+    timeout-minutes: 20  # 脚本内部预算是12分钟，这里留够缓冲；防止哪次卡死了长时间占着队列
     steps:
       - uses: actions/checkout@v4
 
